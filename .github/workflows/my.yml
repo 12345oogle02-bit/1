@@ -1,297 +1,306 @@
-name: Android Emulator + Tailscale + Root Access
+  name: Android Emulator + Tailscale + Root Access
 
-on:
-  workflow_dispatch:
-    inputs:
-      ts_tailnet:
-        description: "Tailscale tailnet (e.g. you@gmail.com)"
-        required: true
-      ts_api_key:
-        description: "Tailscale API key (device admin, no Bearer)"
-        required: true
-      ts_authkey:
-        description: "Tailscale Auth key (reusable or ephemeral)"
-        required: true
-      quick_test:
-        description: "Run 5-minute test"
-        type: boolean
-        default: false
-      runtime_minutes:
-        description: "Runtime (max 360; default 355 when not test)"
-        required: false
-        default: "355"
-      android_api:
-        description: "Android API level (28, 29, 30, 31, 33, 34)"
-        required: false
-        default: "33"
-      device_profile:
-        description: "Device profile (pixel_6, pixel_5, nexus_6)"
-        required: false
-        default: "pixel_6"
+  on:
+    workflow_dispatch:
+      inputs:
+        ts_tailnet:
+          description: "Tailscale tailnet (e.g. you@gmail.com)"
+          required: true
+        ts_api_key:
+          description: "Tailscale API key (device admin, no Bearer)"
+          required: true
+        ts_authkey:
+          description: "Tailscale Auth key (reusable or ephemeral)"
+          required: true
+        quick_test:
+          description: "Run 5-minute test"
+          type: boolean
+          default: false
+        runtime_minutes:
+          description: "Runtime (max 360; default 355 when not test)"
+          required: false
+          default: "355"
+        android_api:
+          description: "Android API level (29, 30, 31, 33, 34)"
+          required: false
+          default: "30"
 
-permissions:
-  contents: read
-  actions: write
+  permissions:
+    contents: read
+    actions: write
 
-jobs:
-  android:
-    runs-on: ubuntu-latest
-    timeout-minutes: 370
+  jobs:
+    android:
+      runs-on: ubuntu-latest
+      timeout-minutes: 370
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4
 
-      - name: Enable KVM group perms
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+        - name: Enable KVM group perms
+          run: |
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+        - name: Set up JDK 17
+          uses: actions/setup-java@v4
+          with:
+            java-version: '17'
+            distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        - name: Setup Android SDK
+          uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
-        run: |
-          sdkmanager --install "platform-tools" "platforms;android-${{ inputs.android_api }}"
-          sdkmanager --install "system-images;android-${{ inputs.android_api }};google_apis;x86_64"
-          sdkmanager --install "emulator"
-          sdkmanager --install "build-tools;34.0.0"
+        - name: Install Android SDK components
+          run: |
+            yes | sdkmanager --licenses || true
+            sdkmanager --install "platform-tools" "platforms;android-${{ inputs.android_api }}"
+            sdkmanager --install "system-images;android-${{ inputs.android_api }};google_apis;x86_64"
+            sdkmanager --install "emulator"
+            sdkmanager --install "build-tools;34.0.0"
+            
+            echo "Installed packages:"
+            sdkmanager --list_installed
 
-      - name: Create AVD with root access
-        run: |
-          echo "no" | avdmanager create avd \
-            --force \
-            --name android_emulator \
-            --device "${{ inputs.device_profile }}" \
-            --package "system-images;android-${{ inputs.android_api }};google_apis;x86_64" \
-            --tag "google_apis"
-          
-          # Enable root access in AVD config
-          AVD_PATH="$HOME/.android/avd/android_emulator.avd"
-          echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
-          echo "hw.gpu.enabled=yes" >> "$AVD_PATH/config.ini"
-          echo "hw.gpu.mode=auto" >> "$AVD_PATH/config.ini"
-
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="android-emu" --accept-dns=true --accept-routes=true
-          TAILSCALE_IP=$(tailscale ip -4)
-          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          echo "Tailscale IPv4: $TAILSCALE_IP"
-
-      - name: Start Android Emulator in background
-        run: |
-          # Start emulator with writable system for root
-          nohup $ANDROID_HOME/emulator/emulator \
-            -avd android_emulator \
-            -no-snapshot-save \
-            -no-window \
-            -gpu swiftshader_indirect \
-            -no-audio \
-            -writable-system \
-            -no-boot-anim \
-            -camera-back none \
-            -camera-front none \
-            > emulator.log 2>&1 &
-          
-          echo "Waiting for emulator to boot..."
-
-      - name: Wait for emulator to boot
-        run: |
-          adb wait-for-device
-          
-          # Wait for boot complete
-          timeout=300
-          until adb shell getprop sys.boot_completed | grep -q 1; do
-            echo "Waiting for boot to complete..."
-            sleep 5
-            timeout=$((timeout - 5))
-            if [ $timeout -le 0 ]; then
-              echo "Emulator boot timeout!"
-              cat emulator.log
+        - name: Create AVD with root access
+          run: |
+            echo "no" | avdmanager create avd \
+              --force \
+              --name android_emulator \
+              --package "system-images;android-${{ inputs.android_api }};google_apis;x86_64" \
+              --tag "google_apis"
+            
+            # Verify AVD was created
+            AVD_PATH="$HOME/.android/avd/android_emulator.avd"
+            if [ ! -f "$AVD_PATH/config.ini" ]; then
+              echo "AVD creation failed! Listing available system images:"
+              sdkmanager --list_installed
               exit 1
             fi
-          done
-          
-          echo "Emulator booted successfully!"
-          adb devices -l
-
-      - name: Enable root access
-        run: |
-          # Remount system as writable and enable root
-          adb root
-          sleep 3
-          adb remount
-          sleep 2
-          
-          # Verify root access
-          adb shell "su -c 'id'" || echo "Root verification pending..."
-          
-          # Set properties
-          adb shell "setprop service.adb.root 1"
-          
-          echo "Root access enabled"
-
-      - name: Install Magisk (for persistent root)
-        run: |
-          # Download latest Magisk APK
-          MAGISK_URL="https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
-          wget -O magisk.apk "$MAGISK_URL"
-          
-          # Install Magisk
-          adb install magisk.apk
-          
-          echo "Magisk installed"
-
-      - name: Configure ADB over network
-        run: |
-          # Enable ADB over TCP on port 5555
-          adb tcpip 5555
-          sleep 2
-          
-          # Get emulator IP (usually 10.0.2.15 for emulator)
-          EMU_IP=$(adb shell ip addr show | grep "inet " | grep -v "127.0.0.1" | head -1 | awk '{print $2}' | cut -d/ -f1)
-          echo "EMU_IP=$EMU_IP" >> $GITHUB_ENV
-          echo "Emulator IP: $EMU_IP"
-          
-          # Test connection
-          adb connect localhost:5555
-
-      - name: Install scrcpy server
-        run: |
-          # Install scrcpy for screen mirroring
-          sudo apt-get update
-          sudo apt-get install -y scrcpy
-          
-          # Verify scrcpy can connect
-          scrcpy --version
-
-      - name: Setup VNC server (for GUI access)
-        run: |
-          # Install x11vnc and virtual display
-          sudo apt-get install -y x11vnc xvfb
-          
-          # Start virtual display
-          Xvfb :99 -screen 0 1920x1080x24 &
-          export DISPLAY=:99
-          
-          # Start VNC server (password: android123)
-          mkdir -p ~/.vnc
-          x11vnc -storepasswd android123 ~/.vnc/passwd
-          x11vnc -display :99 -forever -shared -rfbport 5900 -rfbauth ~/.vnc/passwd &
-          
-          echo "VNC server started on port 5900"
-
-      - name: Install useful Android tools
-        run: |
-          # Install common tools
-          adb shell "pm install -r /system/priv-app/*/base.apk" || true
-          
-          # Enable developer options
-          adb shell "settings put global development_settings_enabled 1"
-          adb shell "settings put global adb_enabled 1"
-          
-          # Disable screen lock
-          adb shell "settings put global stay_on_while_plugged_in 7"
-          adb shell "settings put system screen_off_timeout 2147483647"
-
-      - name: Setup port forwarding via Tailscale
-        run: |
-          # Forward ADB port
-          sudo iptables -t nat -A PREROUTING -p tcp --dport 5555 -j DNAT --to-destination localhost:5555
-          sudo iptables -t nat -A POSTROUTING -j MASQUERADE
-          
-          # Forward VNC port
-          sudo iptables -t nat -A PREROUTING -p tcp --dport 5900 -j DNAT --to-destination localhost:5900
-          
-          echo "Port forwarding configured"
-
-      - name: Display connection information
-        run: |
-          echo "=========================================="
-          echo "Android Emulator Ready!"
-          echo "=========================================="
-          echo ""
-          echo "Tailscale IP: $TAILSCALE_IP"
-          echo ""
-          echo "ADB Connection:"
-          echo "  adb connect $TAILSCALE_IP:5555"
-          echo "  adb root"
-          echo "  adb shell"
-          echo ""
-          echo "VNC Connection:"
-          echo "  Host: $TAILSCALE_IP:5900"
-          echo "  Password: android123"
-          echo ""
-          echo "Device Info:"
-          adb shell getprop ro.build.version.release
-          adb shell getprop ro.product.model
-          adb shell getprop ro.build.version.sdk
-          echo ""
-          echo "Root Status:"
-          adb shell "su -c 'whoami'" || echo "Root: enabled via adb root"
-          echo "=========================================="
-
-      - name: Calculate runtime
-        run: |
-          if [ "${{ inputs.quick_test }}" = "true" ]; then
-            RUNTIME=5
-          else
-            RUNTIME=${{ inputs.runtime_minutes }}
-            if [ $RUNTIME -lt 6 ]; then RUNTIME=355; fi
-            if [ $RUNTIME -gt 360 ]; then RUNTIME=355; fi
-          fi
-          echo "RUNTIME_MINUTES=$RUNTIME" >> $GITHUB_ENV
-          echo "Runtime set to: $RUNTIME minutes"
-
-      - name: Keep alive and monitor
-        run: |
-          END_TIME=$(($(date +%s) + ($RUNTIME_MINUTES * 60)))
-          
-          while [ $(date +%s) -lt $END_TIME ]; do
-            CURRENT=$(date '+%H:%M:%S')
-            END=$(date -d "@$END_TIME" '+%H:%M:%S')
             
-            # Check emulator status
-            if ! adb devices | grep -q "emulator"; then
-              echo "Emulator disconnected! Attempting reconnect..."
-              adb connect localhost:5555
+            # Enable root access in AVD config
+            echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
+            echo "hw.gpu.enabled=yes" >> "$AVD_PATH/config.ini"
+            echo "hw.gpu.mode=auto" >> "$AVD_PATH/config.ini"
+            
+            echo "AVD created successfully"
+            cat "$AVD_PATH/config.ini"
+
+        - name: Install Tailscale
+          run: |
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="android-emu" --accept-dns=true --accept-routes=true
+            TAILSCALE_IP=$(tailscale ip -4)
+            echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+            echo "Tailscale IPv4: $TAILSCALE_IP"
+
+        - name: Start Android Emulator in background
+          run: |
+            # Start emulator with writable system for root
+            nohup $ANDROID_HOME/emulator/emulator \
+              -avd android_emulator \
+              -no-snapshot-save \
+              -no-window \
+              -gpu swiftshader_indirect \
+              -no-audio \
+              -writable-system \
+              -no-boot-anim \
+              -camera-back none \
+              -camera-front none \
+              > emulator.log 2>&1 &
+            
+            echo "Waiting for emulator to boot..."
+
+        - name: Wait for emulator to boot
+          run: |
+            adb wait-for-device
+            
+            # Wait for boot complete
+            timeout=300
+            until adb shell getprop sys.boot_completed | grep -q 1; do
+              echo "Waiting for boot to complete..."
+              sleep 5
+              timeout=$((timeout - 5))
+              if [ $timeout -le 0 ]; then
+                echo "Emulator boot timeout!"
+                cat emulator.log
+                exit 1
+              fi
+            done
+            
+            echo "Emulator booted successfully!"
+            adb devices -l
+
+        - name: Enable root access
+          run: |
+            # Remount system as writable and enable root
+            adb root
+            sleep 3
+            adb remount
+            sleep 2
+            
+            # Verify root access
+            adb shell "su -c 'id'" || echo "Root verification pending..."
+            
+            # Set properties
+            adb shell "setprop service.adb.root 1"
+            
+            echo "Root access enabled"
+
+        - name: Install Magisk (for persistent root)
+          run: |
+            # Download latest Magisk APK
+            MAGISK_URL="https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
+            wget -O magisk.apk "$MAGISK_URL"
+            
+            # Install Magisk
+            adb install magisk.apk
+            
+            echo "Magisk installed"
+
+        - name: Configure ADB over network
+          run: |
+            # Enable ADB over TCP on port 5555
+            adb tcpip 5555
+            sleep 2
+            
+            # Get emulator IP (usually 10.0.2.15 for emulator)
+            EMU_IP=$(adb shell ip addr show | grep "inet " | grep -v "127.0.0.1" | head -1 | awk '{print $2}' | cut -d/ -f1)
+            echo "EMU_IP=$EMU_IP" >> $GITHUB_ENV
+            echo "Emulator IP: $EMU_IP"
+            
+            # Test connection
+            adb connect localhost:5555
+
+        - name: Install scrcpy server
+          run: |
+            # Install scrcpy for screen mirroring
+            sudo apt-get update
+            sudo apt-get install -y scrcpy
+            
+            # Verify scrcpy can connect
+            scrcpy --version
+
+        - name: Setup VNC server (for GUI access)
+          run: |
+            # Install x11vnc and virtual display
+            sudo apt-get install -y x11vnc xvfb
+            
+            # Start virtual display
+            Xvfb :99 -screen 0 1920x1080x24 &
+            export DISPLAY=:99
+            
+            # Start VNC server (password: android123)
+            mkdir -p ~/.vnc
+            x11vnc -storepasswd android123 ~/.vnc/passwd
+            x11vnc -display :99 -forever -shared -rfbport 5900 -rfbauth ~/.vnc/passwd &
+            
+            echo "VNC server started on port 5900"
+
+        - name: Install useful Android tools
+          run: |
+            # Install common tools
+            adb shell "pm install -r /system/priv-app/*/base.apk" || true
+            
+            # Enable developer options
+            adb shell "settings put global development_settings_enabled 1"
+            adb shell "settings put global adb_enabled 1"
+            
+            # Disable screen lock
+            adb shell "settings put global stay_on_while_plugged_in 7"
+            adb shell "settings put system screen_off_timeout 2147483647"
+
+        - name: Setup port forwarding via Tailscale
+          run: |
+            # Forward ADB port
+            sudo iptables -t nat -A PREROUTING -p tcp --dport 5555 -j DNAT --to-destination localhost:5555
+            sudo iptables -t nat -A POSTROUTING -j MASQUERADE
+            
+            # Forward VNC port
+            sudo iptables -t nat -A PREROUTING -p tcp --dport 5900 -j DNAT --to-destination localhost:5900
+            
+            echo "Port forwarding configured"
+
+        - name: Display connection information
+          run: |
+            echo "=========================================="
+            echo "Android Emulator Ready!"
+            echo "=========================================="
+            echo ""
+            echo "Tailscale IP: $TAILSCALE_IP"
+            echo ""
+            echo "ADB Connection:"
+            echo "  adb connect $TAILSCALE_IP:5555"
+            echo "  adb root"
+            echo "  adb shell"
+            echo ""
+            echo "VNC Connection:"
+            echo "  Host: $TAILSCALE_IP:5900"
+            echo "  Password: android123"
+            echo ""
+            echo "Device Info:"
+            adb shell getprop ro.build.version.release
+            adb shell getprop ro.product.model
+            adb shell getprop ro.build.version.sdk
+            echo ""
+            echo "Root Status:"
+            adb shell "su -c 'whoami'" || echo "Root: enabled via adb root"
+            echo "=========================================="
+
+        - name: Calculate runtime
+          run: |
+            if [ "${{ inputs.quick_test }}" = "true" ]; then
+              RUNTIME=5
+            else
+              RUNTIME=${{ inputs.runtime_minutes }}
+              if [ $RUNTIME -lt 6 ]; then RUNTIME=355; fi
+              if [ $RUNTIME -gt 360 ]; then RUNTIME=355; fi
             fi
-            
-            # Display heartbeat
-            echo "[Android Emulator] Heartbeat $CURRENT | Ends at $END | Tailscale: $TAILSCALE_IP | ADB: 5555 | VNC: 5900"
-            
-            # Show resource usage
-            echo "CPU: $(adb shell "top -n 1 | head -5" 2>/dev/null | tail -1 || echo 'N/A')"
-            
-            sleep 60
-          done
-          
-          echo "Runtime completed. Shutting down..."
+            echo "RUNTIME_MINUTES=$RUNTIME" >> $GITHUB_ENV
+            echo "Runtime set to: $RUNTIME minutes"
 
-      - name: Cleanup
-        if: always()
-        run: |
-          echo "Stopping emulator..."
-          adb emu kill || true
-          
-          echo "Tailscale logout..."
-          sudo tailscale logout || true
-          
-          echo "Cleanup complete"
+        - name: Keep alive and monitor
+          run: |
+            END_TIME=$(($(date +%s) + ($RUNTIME_MINUTES * 60)))
+            
+            while [ $(date +%s) -lt $END_TIME ]; do
+              CURRENT=$(date '+%H:%M:%S')
+              END=$(date -d "@$END_TIME" '+%H:%M:%S')
+              
+              # Check emulator status
+              if ! adb devices | grep -q "emulator"; then
+                echo "Emulator disconnected! Attempting reconnect..."
+                adb connect localhost:5555
+              fi
+              
+              # Display heartbeat
+              echo "[Android Emulator] Heartbeat $CURRENT | Ends at $END | Tailscale: $TAILSCALE_IP | ADB: 5555 | VNC: 5900"
+              
+              # Show resource usage
+              echo "CPU: $(adb shell "top -n 1 | head -5" 2>/dev/null | tail -1 || echo 'N/A')"
+              
+              sleep 60
+            done
+            
+            echo "Runtime completed. Shutting down..."
 
-      - name: Upload emulator logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: emulator-logs
-          path: emulator.log
-          retention-days: 1
+        - name: Cleanup
+          if: always()
+          run: |
+            echo "Stopping emulator..."
+            adb emu kill || true
+            
+            echo "Tailscale logout..."
+            sudo tailscale logout || true
+            
+            echo "Cleanup complete"
+
+        - name: Upload emulator logs
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+            name: emulator-logs
+            path: emulator.log
+            retention-days: 1
