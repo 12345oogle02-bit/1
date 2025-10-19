@@ -1,8 +1,17 @@
-name: Android + tmate Terminal (Instant Access)
+name: Android + Tailscale SSH (Direct Access)
 
 on:
   workflow_dispatch:
     inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+      ts_authkey:
+        description: "Tailscale Auth key (reusable or ephemeral)"
+        required: true
       runtime_minutes:
         description: "Runtime (max 360; default 355)"
         required: false
@@ -49,12 +58,121 @@ jobs:
           
           echo "✅ Android SDK installed"
 
-      - name: Setup tmate session (Terminal Access)
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: false
-          timeout-minutes: ${{ inputs.runtime_minutes }}
-
-      - name: Keep alive
+      - name: Install Tailscale
         run: |
-          echo "Session ended"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="android-dev" --accept-dns=true --accept-routes=true --ssh
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
+          echo "Tailscale IPv4: $TAILSCALE_IP"
+
+      - name: Enable SSH access
+        run: |
+          # Tailscale SSH is already enabled with --ssh flag
+          # But let's also enable password auth for easier access
+          sudo systemctl start ssh
+          echo "runner:android123" | sudo chpasswd
+          
+          echo "=========================================="
+          echo "🚀 SSH ACCESS READY!"
+          echo "=========================================="
+          echo ""
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo ""
+          echo "Connect via SSH:"
+          echo "  ssh runner@$TAILSCALE_IP"
+          echo "  Password: android123"
+          echo ""
+          echo "Or use Tailscale SSH (no password):"
+          echo "  ssh $TAILSCALE_IP"
+          echo ""
+          echo "=========================================="
+
+      - name: Display Android commands
+        run: |
+          echo "=========================================="
+          echo "📱 ANDROID SDK READY"
+          echo "=========================================="
+          echo ""
+          echo "Android SDK: $ANDROID_HOME"
+          echo "ADB: $(which adb)"
+          echo ""
+          echo "Available system images:"
+          sdkmanager --list_installed | grep system-images
+          echo ""
+          echo "=========================================="
+          echo "TO START EMULATOR (after SSH in):"
+          echo "=========================================="
+          echo ""
+          echo "1. Create AVD:"
+          echo "   echo 'no' | avdmanager create avd -n myandroid -k 'system-images;android-${{ inputs.android_api }};google_apis;x86_64' -d pixel"
+          echo ""
+          echo "2. Start emulator:"
+          echo "   nohup \$ANDROID_HOME/emulator/emulator -avd myandroid -no-window -no-audio -gpu swiftshader_indirect > emulator.log 2>&1 &"
+          echo ""
+          echo "3. Wait for boot:"
+          echo "   adb wait-for-device"
+          echo "   adb shell 'while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done'"
+          echo ""
+          echo "4. Check it works:"
+          echo "   adb devices"
+          echo "   adb shell getprop ro.build.version.release"
+          echo ""
+          echo "5. Enable network ADB:"
+          echo "   adb tcpip 5555"
+          echo ""
+          echo "6. Connect from your Mac:"
+          echo "   adb connect $TAILSCALE_IP:5555"
+          echo ""
+          echo "=========================================="
+
+      - name: Keep alive and monitor
+        run: |
+          RUNTIME=${{ inputs.runtime_minutes }}
+          if [ $RUNTIME -lt 6 ]; then RUNTIME=355; fi
+          if [ $RUNTIME -gt 360 ]; then RUNTIME=355; fi
+          
+          END_TIME=$(($(date +%s) + ($RUNTIME * 60)))
+          
+          echo "=========================================="
+          echo "✅ SESSION ACTIVE - SSH IN NOW!"
+          echo "=========================================="
+          echo "SSH: ssh runner@$TAILSCALE_IP (password: android123)"
+          echo "Or:  ssh $TAILSCALE_IP (Tailscale SSH)"
+          echo "=========================================="
+          
+          while [ $(date +%s) -lt $END_TIME ]; do
+            CURRENT=$(date '+%H:%M:%S')
+            END=$(date -d "@$END_TIME" '+%H:%M:%S')
+            
+            echo "[SSH Active] $CURRENT | Ends at $END | SSH: runner@$TAILSCALE_IP"
+            
+            # Show if emulator is running
+            if pgrep -f "emulator" > /dev/null; then
+              echo "  ✅ Emulator is running"
+              if adb devices 2>/dev/null | grep -q "device$"; then
+                echo "  ✅ ADB connected"
+                # Show ADB network status
+                if netstat -tuln 2>/dev/null | grep -q ":5555"; then
+                  echo "  ✅ ADB network enabled on port 5555"
+                fi
+              fi
+            else
+              echo "  ⏸️  No emulator running (start it via SSH)"
+            fi
+            
+            sleep 60
+          done
+          
+          echo "Runtime completed. Shutting down..."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Stopping any running emulators..."
+          pkill -f emulator || true
+          
+          echo "Tailscale logout..."
+          sudo tailscale logout || true
+          
+          echo "Cleanup complete"
